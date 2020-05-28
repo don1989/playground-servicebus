@@ -32,11 +32,11 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
 
     const buffer = JSON.stringify(message);
     const bufferSize = (new TextEncoder().encode(buffer)).byteLength;
-    console.log('bufferSize : ', bufferSize)
+    // console.log('bufferSize : ', bufferSize)
     if ( bufferSize > maxAllowableSize ) {
         const numMessages = Math.ceil(bufferSize / maxAllowableSize);
         
-        console.log('too big', bufferSize, maxAllowableSize, numMessages)
+        // console.log('too big', bufferSize, maxAllowableSize, numMessages)
         
         const chunks = [];
         const chunkSize = maxAllowableSize;
@@ -54,7 +54,7 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
 
         let accumulatedLen = 0;
         chunks.forEach( c => accumulatedLen += c.length );
-        console.log('sizeof chunks', accumulatedLen )
+        // console.log('sizeof chunks', accumulatedLen )
         for ( let i = 0; i < numMessages; ++i ) {
             
             await sender.send({
@@ -69,7 +69,7 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
             });
         }
 
-        console.log('sent all ', numMessages)
+        // console.log('sent all ', numMessages)
     }
     else {
         await sender.send({
@@ -88,8 +88,9 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
 
 const order = {
     ID: 123,
-    Name: 'Paul',
-    Surname: 'Smith'
+    Name: 'Tom',
+    Surname: 'Cat',
+    Bike: '99.00'
 }
 
 const sendToServiceBus = async (req: Request, res: Response) => {
@@ -111,14 +112,14 @@ const sendToServiceBus = async (req: Request, res: Response) => {
 
         const bod = [];
         const leInt = getRandomInt(100000);
-        console.log('msg size: ', leInt)
+        // console.log('msg size: ', leInt)
         for ( let i = 0; i < leInt; ++i ) {
             bod.push(order)
         }
 
         await sendMessage( bod, sessionId, serviceBusClient, requestQueue, responseQueue );
         
-        console.log('Sent to SB request queue ', requestQueue, sessionId)
+        // console.log('Sent to SB request queue ', requestQueue, sessionId)
 
         // Now we must await the response...
         const receiver = serviceBusClient.createSessionReceiver(responseQueue, "peekLock", {

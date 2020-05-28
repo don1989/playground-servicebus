@@ -1,27 +1,25 @@
 
 import { ServiceBusClient, ReceivedMessageWithLock, SessionReceiver, MessagingError, delay } from "@azure/service-bus";
-import { AbortController } from "@azure/abort-controller";
 
-const connectionString = "Endpoint=sb://uk01d-sb01.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=jYOvxpDlxovPypyvA5VxbY0MD3SZ40kvWDML/jRH7L8=";
-const requestQueue = "playground_request";
-const responseQueue = "playground_response";
-
-const serviceBusClient = new ServiceBusClient( connectionString );
+const maxSessionsToProcessSimultaneously 	= 8;
+const sessionIdleTimeoutMs 					= 5 * 1000;
+const delayOnErrorMs 						= 5 * 1000;
+const maxMessageSize 						= 262144;
+const maxHeaderSize 						= 64000;
+const allowableError 						= 40000;
+const maxAllowableSize 						= maxMessageSize - maxHeaderSize - allowableError;
+	
 const sendMessage = async ( message : any, sessionId : string, serviceBusClient : ServiceBusClient, queue : string) => {
     
     const sender = serviceBusClient.createSender(queue);
-    const maxMessageSize = 262144;
-    const maxHeaderSize = 64000;
-    const allowableError = 40000;
-    const maxAllowableSize = maxMessageSize - maxHeaderSize - allowableError;
-
+    
     const buffer = JSON.stringify(message);
     const bufferSize = (new TextEncoder().encode(buffer)).byteLength;
-    console.log('bufferSize : ', bufferSize)
+    // console.log('bufferSize : ', bufferSize)
     if ( bufferSize > maxAllowableSize ) {
         const numMessages = Math.ceil(bufferSize / maxAllowableSize);
         
-        console.log('too big', bufferSize, maxAllowableSize, numMessages)
+        // console.log('too big', bufferSize, maxAllowableSize, numMessages)
         
         const chunks = [];
         const chunkSize = maxAllowableSize;
@@ -39,7 +37,7 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
 
         let accumulatedLen = 0;
         chunks.forEach( c => accumulatedLen += c.length );
-        console.log('sizeof chunks', accumulatedLen )
+        // console.log('sizeof chunks', accumulatedLen )
         for ( let i = 0; i < numMessages; ++i ) {
             
             await sender.send({
@@ -53,7 +51,7 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
             });
         }
 
-        console.log('sent all ', numMessages)
+        // console.log('sent all ', numMessages)
     }
     else {
         await sender.send({
@@ -66,43 +64,37 @@ const sendMessage = async ( message : any, sessionId : string, serviceBusClient 
             }
         });
     }
-    await sender.close();
+	await sender.close();
 }
-
-/* */
-// This can be used control when the round-robin processing will terminate
-// by calling abortController.abort().
-const abortController = new AbortController();
-
-const maxSessionsToProcessSimultaneously = 8;
-const sessionIdleTimeoutMs = 5 * 1000;
-const delayOnErrorMs = 5 * 1000;
-
 
 // Called by the SessionReceiver when a message is received.
 // This is passed as part of the handlers when calling `SessionReceiver.subscribe()`.
-async function processMessage(msg: ReceivedMessageWithLock, sessionData : any[]) {
+async function processMessage(serviceBusClient : ServiceBusClient, 
+	msg: ReceivedMessageWithLock, 
+	sessionData : any[], 
+	responseQueue : string,
+	processMessageHandler : (msgBody : string)=>Promise<void>) {
+
     const numMessages = msg.userProperties ? msg.userProperties['numMessages'] : 0;
     const messageIndex = msg.userProperties ? msg.userProperties['messageIndex'] : 0;
     const totalBufferSize = msg.userProperties ? msg.userProperties['totalBufferSize'] : 0;
 
-    // if ( numMessages > 1 ) {
-        sessionData.push( msg.body );
-    // }
+	sessionData.push( msg.body );
+	
     console.log(`[${msg.sessionId}] received message with body`, /*msg.body, JSON.parse(msg.body),*/ messageIndex + 1, numMessages, sessionData.length );
     if ( (sessionData.length === numMessages && numMessages > 0) || numMessages === 0 ) {
         console.log('got all messages');
 
         // We would have stringified if the messages are more than 1.
         const joinedData = sessionData.length > 1 ? sessionData.join('') : JSON.stringify(sessionData[0]);
-        // console.log('joinedData', joinedData);
-        let parsedData;
+		// console.log('joinedData', joinedData);
+		let responseVal;
         try {
-            // There is no need to parse if the number of messages is 1. Otherwise we would have
-            // stringified it and split it up.
-            parsedData = JSON.parse(joinedData)
-            console.log('json parsed')
+			const parsedData = JSON.parse(joinedData)
+			responseVal = await processMessageHandler( parsedData );
+            console.log('json parsed and processed')
         } catch( err ){
+			responseVal = err;
             console.log(err)
         }
 
@@ -114,122 +106,115 @@ async function processMessage(msg: ReceivedMessageWithLock, sessionData : any[])
         }
 
         await sendMessage( 
-            parsedData, 
+            responseVal, 
             msg.sessionId!, 
             serviceBusClient, 
             responseQueue);
     }
-    else {
-        
-    }
+
     await msg.complete();
-  }
+}
   
   // Called by the SessionReceiver when an error occurs.
   // This will be called in the handlers we pass in `SessionReceiver.subscribe()`
   // and by the sample when we encounter an error opening a session.
-  async function processError(err: Error, sessionId?: string) {
-    if (sessionId) {
-      console.log(`Error when receiving messages from the session ${sessionId}: `, err);
-    } else {
-      console.log(`Error when creating the receiver for next available session`, err);
-    }
-  }
-
-
-  // Called just before we start processing the first message of a session.
-// NOTE: This function is used only in the sample and is not part of the Service Bus library.
-async function sessionAccepted(sessionId: string) {
-    // console.log(`[${sessionId}] will start processing...`);
-  }
-
-  // Called if we are closing a session.
-// `reason` will be:
-// * 'error' if we are closing because of an error(the error will be delivered
-//   to `processError` above)
-// * 'idle_timeout' if `sessionIdleTimeoutMs` milliseconds pass without
-//   any messages being received (ie, session can be considered empty).
-// NOTE: This function is used only in the sample and is not part of the Service Bus library.
-async function sessionClosed(reason: "error" | "idle_timeout", sessionId: string) {
-    // console.log(`[${sessionId}] was closed because of ${reason}`);
-  }
+async function processError(err: Error, sessionId?: string) {
+	if (sessionId) {
+		console.log(`Error when receiving messages from the session ${sessionId}: `, err);
+	} else {
+		console.log(`Error when creating the receiver for next available session`, err);
+	}
+}
 
   // utility function to create a timer that can be refreshed
 function createRefreshableTimer(timeoutMs: number, resolve: Function): () => void {
     let timer: any;
   
-    return () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => resolve(), timeoutMs);
-    };
-  }
+	return () => {
+		clearTimeout(timer);
+		timer = setTimeout(() => resolve(), timeoutMs);
+	};
+}
 
 // Queries Service Bus for the next available session and processes it.
-async function receiveFromNextSession(serviceBusClient: ServiceBusClient): Promise<void> {
+async function receiveFromNextSession(serviceBusClient: ServiceBusClient, 
+									  requestQueue : string,
+									  responseQueue : string,
+									  abortController : AbortController,
+									  processMessageHandler : ( messageBody: any )=>Promise<void>): Promise<void> {
     let sessionReceiver: SessionReceiver<ReceivedMessageWithLock>;
   
     const sessionData = [] as any[];
     try {
-      sessionReceiver = serviceBusClient.createSessionReceiver(requestQueue, "peekLock")
+
+		sessionReceiver = serviceBusClient.createSessionReceiver(requestQueue, "peekLock");
+		  
     } catch (err) {
-      if (
-        (err as MessagingError).code === "SessionCannotBeLockedError" ||
-        (err as MessagingError).code === "OperationTimeoutError"
-      ) {
-        console.log(`INFO: no available sessions, sleeping for ${delayOnErrorMs}`);
-      } else {
-        await processError(err, undefined);
-      }
-  
-      await delay(delayOnErrorMs);
-      return;
+		if ((err as MessagingError).code === "SessionCannotBeLockedError" ||
+			(err as MessagingError).code === "OperationTimeoutError") {
+			console.log(`INFO: no available sessions, sleeping for ${delayOnErrorMs}`);
+		} 
+		else {
+			await processError(err, undefined);
+		}
+			
+		await delay(delayOnErrorMs);
+		return;
     }
-  
-    await sessionAccepted(sessionReceiver.sessionId!);
-  
+    
     const sessionFullyRead = new Promise((resolveSessionAsFullyRead, rejectSessionWithError) => {
-      const refreshTimer = createRefreshableTimer(sessionIdleTimeoutMs, resolveSessionAsFullyRead);
-      refreshTimer();
+      	const refreshTimer = createRefreshableTimer(sessionIdleTimeoutMs, resolveSessionAsFullyRead);
+      	refreshTimer();
   
-      sessionReceiver.subscribe({
-          async processMessage(msg) {
-            refreshTimer();
-            await processMessage(msg, sessionData);
-          },
-          async processError(err) {
-            rejectSessionWithError(err);
-          }
-        },
-        {
-          abortSignal: abortController.signal
-        }
-      );
+		sessionReceiver.subscribe({
+			async processMessage(msg) {
+				refreshTimer();
+				await processMessage(serviceBusClient, msg, sessionData, responseQueue, processMessageHandler);
+			},
+			async processError(err) {
+				rejectSessionWithError(err);
+			}
+		},
+		{
+			abortSignal: abortController.signal
+		});
     });
   
     try {
-      await sessionFullyRead;
-      await sessionClosed("idle_timeout", sessionReceiver.sessionId!);
+      	await sessionFullyRead;
     } catch (err) {
-      await processError(err, sessionReceiver.sessionId);
-      await sessionClosed("error", sessionReceiver.sessionId!);
+      	await processError(err, sessionReceiver.sessionId);
     } finally {
         await sessionReceiver.close();
     }
-  }
+}
   
 
-async function roundRobinThroughAvailableSessions(): Promise<void> {
-  
+async function roundRobinThroughAvailableSessions( 
+	connectionString : string,
+	requestQueue : string, 
+	responseQueue : string,
+	abortController : AbortController,
+	processMessageHandler : (messageBody : any)=>Promise<any>, 
+	): Promise<void> {
+
+	const serviceBusClient = new ServiceBusClient( connectionString );
+
     const receiverPromises = [];
   
     for (let i = 0; i < maxSessionsToProcessSimultaneously; ++i) {
-      receiverPromises.push(
-        (async () => {
-          while (!abortController.signal.aborted) {
-            await receiveFromNextSession(serviceBusClient);
-          }
-        })()
-      );
+      	receiverPromises.push(
+			(async () => {
+			while (!abortController.signal.aborted) {
+				await receiveFromNextSession(
+					serviceBusClient, 
+					requestQueue, 
+					responseQueue, 
+					abortController,
+					processMessageHandler);
+			}
+			})()
+		);
     }
   
     console.log(`Listening for available sessions...`);
@@ -237,7 +222,6 @@ async function roundRobinThroughAvailableSessions(): Promise<void> {
   
     await serviceBusClient.close();
     console.log(`Exiting...`);
-  }
+}
 
-
-  roundRobinThroughAvailableSessions().catch(err => console.log(`Fatal error : ${err}`))
+export default roundRobinThroughAvailableSessions;
